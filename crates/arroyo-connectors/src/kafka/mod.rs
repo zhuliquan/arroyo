@@ -1,7 +1,8 @@
 use anyhow::{anyhow, bail};
+use arrow::datatypes::DataType;
 use arroyo_formats::de::ArrowDeserializer;
 use arroyo_formats::ser::ArrowSerializer;
-use arroyo_operator::connector::Connection;
+use arroyo_operator::connector::{Connection, MetadataDef};
 use arroyo_rpc::api_types::connections::{ConnectionProfile, ConnectionSchema, TestSourceMessage};
 use arroyo_rpc::df::ArroyoSchema;
 use arroyo_rpc::formats::{BadData, Format, JsonFormat};
@@ -214,6 +215,7 @@ impl Connector for KafkaConnector {
             format: Some(format),
             bad_data: schema.bad_data.clone(),
             framing: schema.framing.clone(),
+            metadata_fields: schema.metadata_fields(),
         };
 
         Ok(Connection {
@@ -306,6 +308,27 @@ impl Connector for KafkaConnector {
         }
     }
 
+    fn metadata_defs(&self) -> &'static [MetadataDef] {
+        &[
+            MetadataDef {
+                name: "offset_id",
+                data_type: DataType::Int64,
+            },
+            MetadataDef {
+                name: "partition",
+                data_type: DataType::Int32,
+            },
+            MetadataDef {
+                name: "topic",
+                data_type: DataType::Utf8,
+            },
+            MetadataDef {
+                name: "timestamp",
+                data_type: DataType::Int64,
+            },
+        ]
+    }
+
     fn from_options(
         &self,
         name: &str,
@@ -383,6 +406,7 @@ impl Connector for KafkaConnector {
                             .unwrap_or(u32::MAX),
                     )
                     .unwrap(),
+                    metadata_fields: config.metadata_fields,
                 })))
             }
             TableType::Sink {
@@ -622,7 +646,7 @@ impl KafkaTester {
                     let mut builders = aschema.builders();
 
                     let mut error = deserializer
-                        .deserialize_slice(&mut builders, &msg, SystemTime::now())
+                        .deserialize_slice(&mut builders, &msg, SystemTime::now(), None)
                         .await
                         .into_iter()
                         .next();
@@ -644,7 +668,7 @@ impl KafkaTester {
                     let mut builders = aschema.builders();
 
                     let mut error = deserializer
-                        .deserialize_slice(&mut builders, &msg, SystemTime::now())
+                        .deserialize_slice(&mut builders, &msg, SystemTime::now(), None)
                         .await
                         .into_iter()
                         .next();
@@ -678,7 +702,7 @@ impl KafkaTester {
                 let mut builders = aschema.builders();
 
                 let mut error = deserializer
-                    .deserialize_slice(&mut builders, &msg, SystemTime::now())
+                    .deserialize_slice(&mut builders, &msg, SystemTime::now(), None)
                     .await
                     .into_iter()
                     .next();

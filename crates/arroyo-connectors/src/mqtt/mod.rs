@@ -8,8 +8,9 @@ use crate::mqtt::sink::MqttSinkFunc;
 use crate::mqtt::source::MqttSourceFunc;
 use crate::pull_opt;
 use anyhow::{anyhow, bail};
+use arrow::datatypes::DataType;
 use arroyo_formats::ser::ArrowSerializer;
-use arroyo_operator::connector::{Connection, Connector};
+use arroyo_operator::connector::{Connection, Connector, MetadataDef};
 use arroyo_operator::operator::OperatorNode;
 use arroyo_rpc::api_types::connections::{
     ConnectionProfile, ConnectionSchema, ConnectionType, TestSourceMessage,
@@ -183,6 +184,7 @@ impl Connector for MqttConnector {
             format: Some(format),
             bad_data: schema.bad_data.clone(),
             framing: schema.framing.clone(),
+            metadata_fields: schema.metadata_fields(),
         };
 
         Ok(Connection {
@@ -237,6 +239,13 @@ impl Connector for MqttConnector {
         }
     }
 
+    fn metadata_defs(&self) -> &'static [MetadataDef] {
+        &[MetadataDef {
+            name: "topic",
+            data_type: DataType::Utf8,
+        }]
+    }
+
     fn from_options(
         &self,
         name: &str,
@@ -282,6 +291,7 @@ impl Connector for MqttConnector {
                 )
                 .unwrap(),
                 subscribed: Arc::new(AtomicBool::new(false)),
+                metadata_fields: config.metadata_fields,
             })),
             TableType::Sink { retain } => OperatorNode::from_operator(Box::new(MqttSinkFunc {
                 config: profile,

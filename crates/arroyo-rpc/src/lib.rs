@@ -184,6 +184,12 @@ pub struct RateLimit {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MetadataField {
+    pub field_name: String,
+    pub key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OperatorConfig {
     pub connection: Value,
     pub table: Value,
@@ -191,6 +197,8 @@ pub struct OperatorConfig {
     pub bad_data: Option<BadData>,
     pub framing: Option<Framing>,
     pub rate_limit: Option<RateLimit>,
+    #[serde(default)]
+    pub metadata_fields: Vec<MetadataField>,
 }
 
 impl Default for OperatorConfig {
@@ -202,6 +210,7 @@ impl Default for OperatorConfig {
             bad_data: None,
             framing: None,
             rate_limit: None,
+            metadata_fields: vec![],
         }
     }
 }

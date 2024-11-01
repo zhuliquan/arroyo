@@ -20,7 +20,8 @@ use arroyo_rpc::api_types::connections::{
 use arroyo_rpc::formats::{BadData, Format, Framing, JsonFormat};
 use arroyo_rpc::grpc::api::ConnectorOp;
 use arroyo_types::ArroyoExtensionType;
-use datafusion::common::{config::ConfigOptions, DFSchema, Result};
+use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
+use datafusion::common::{config::ConfigOptions, DFSchema, Result, ScalarValue};
 use datafusion::common::{plan_err, Column, DataFusionError};
 use datafusion::execution::context::SessionState;
 use datafusion::execution::FunctionRegistry;
@@ -81,28 +82,37 @@ pub struct ConnectorTable {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FieldSpec {
-    StructField(Field),
-    VirtualField { field: Field, expression: Expr },
+    Struct(Field),
+    Metadata { field: Field, key: String },
+    Virtual { field: Field, expression: Expr },
 }
 
 impl FieldSpec {
     fn is_virtual(&self) -> bool {
         match self {
-            FieldSpec::StructField(_) => false,
-            FieldSpec::VirtualField { .. } => true,
+            FieldSpec::Struct(_) | FieldSpec::Metadata { .. } => false,
+            FieldSpec::Virtual { .. } => true,
         }
     }
     pub fn field(&self) -> &Field {
         match self {
-            FieldSpec::StructField(f) => f,
-            FieldSpec::VirtualField { field, .. } => field,
+            FieldSpec::Struct(f) => f,
+            FieldSpec::Metadata { field, .. } => field,
+            FieldSpec::Virtual { field, .. } => field,
+        }
+    }
+
+    fn metadata_key(&self) -> Option<&str> {
+        match &self {
+            FieldSpec::Metadata { key, .. } => Some(key.as_str()),
+            _ => None,
         }
     }
 }
 
 impl From<Field> for FieldSpec {
     fn from(value: Field) -> Self {
-        FieldSpec::StructField(value)
+        FieldSpec::Struct(value)
     }
 }
 
@@ -188,7 +198,7 @@ impl From<Connection> for ConnectorTable {
                 .schema
                 .fields
                 .iter()
-                .map(|f| FieldSpec::StructField(f.clone().into()))
+                .map(|f| FieldSpec::Struct(f.clone().into()))
                 .collect(),
             config: value.config,
             description: value.description,
@@ -216,15 +226,15 @@ impl ConnectorTable {
             fields = fields
                 .into_iter()
                 .map(|field_spec| match &field_spec {
-                    FieldSpec::StructField(struct_field) => match struct_field.data_type() {
+                    FieldSpec::Struct(struct_field) => match struct_field.data_type() {
                         DataType::Timestamp(_, None) => {
-                            FieldSpec::StructField(struct_field.clone().with_data_type(
+                            FieldSpec::Struct(struct_field.clone().with_data_type(
                                 DataType::Timestamp(arrow_schema::TimeUnit::Microsecond, None),
                             ))
                         }
                         _ => field_spec,
                     },
-                    FieldSpec::VirtualField { .. } => {
+                    FieldSpec::Metadata { .. } | FieldSpec::Virtual { .. } => {
                         unreachable!("delta lake is only a sink, can't have virtual fields")
                     }
                 })
@@ -249,10 +259,9 @@ impl ConnectorTable {
             let df_struct_type =
                 DataType::Struct(fields.iter().map(|f| f.field().clone()).collect());
             let before_field_spec =
-                FieldSpec::StructField(Field::new("before", df_struct_type.clone(), true));
-            let after_field_spec =
-                FieldSpec::StructField(Field::new("after", df_struct_type, true));
-            let op_field_spec = FieldSpec::StructField(Field::new("op", DataType::Utf8, false));
+                FieldSpec::Struct(Field::new("before", df_struct_type.clone(), true));
+            let after_field_spec = FieldSpec::Struct(Field::new("after", df_struct_type, true));
+            let op_field_spec = FieldSpec::Struct(Field::new("op", DataType::Utf8, false));
             input_to_schema_fields = vec![before_field_spec, after_field_spec, op_field_spec];
         }
 
@@ -261,13 +270,19 @@ impl ConnectorTable {
             .filter(|f| !f.is_virtual())
             .map(|f| {
                 let struct_field = f.field();
-                struct_field.clone().try_into().map_err(|_| {
+                let mut sf: SourceField = struct_field.clone().try_into().map_err(|_| {
                     DataFusionError::Plan(format!(
                         "field '{}' has a type '{:?}' that cannot be used in a connection table",
                         struct_field.name(),
                         struct_field.data_type()
                     ))
-                })
+                })?;
+
+                if let Some(key) = f.metadata_key() {
+                    sf.metadata_key = Some(key.to_string());
+                }
+
+                Ok(sf)
             })
             .collect::<Result<_>>()?;
         let bad_data = BadData::from_opts(options)
@@ -422,10 +437,8 @@ impl ConnectorTable {
             struct_def: self
                 .fields
                 .iter()
-                .filter_map(|field| match field {
-                    FieldSpec::StructField(struct_field) => Some(Arc::new(struct_field.clone())),
-                    FieldSpec::VirtualField { .. } => None,
-                })
+                .filter(|f| !f.is_virtual())
+                .map(|f| Arc::new(f.field().clone()))
                 .collect(),
             config: self.connector_op(),
             processing_mode: self.processing_mode(),
@@ -491,6 +504,46 @@ fn value_to_inner_string(value: &Value) -> Result<String> {
     }
 }
 
+#[derive(Default)]
+struct MetadataFinder {
+    key: Option<String>,
+    depth: usize,
+}
+
+impl<'a> TreeNodeVisitor<'a> for MetadataFinder {
+    type Node = Expr;
+
+    fn f_down(&mut self, node: &'a Self::Node) -> Result<TreeNodeRecursion> {
+        if let Expr::ScalarFunction(func) = node {
+            if func.name() == "metadata" {
+                if self.depth > 0 {
+                    return plan_err!(
+                        "Metadata columns must have only a single call to 'metadata'"
+                    );
+                }
+
+                return if let &[arg] = &func.args.as_slice() {
+                    if let Expr::Literal(ScalarValue::Utf8(Some(key))) = &arg {
+                        self.key = Some(key.clone());
+                        Ok(TreeNodeRecursion::Stop)
+                    } else {
+                        plan_err!("For metadata columns, metadata call must have a literal string argument")
+                    }
+                } else {
+                    plan_err!("For metadata columns, metadata call must have a single argument")
+                };
+            }
+        }
+        self.depth += 1;
+        Ok(TreeNodeRecursion::Continue)
+    }
+
+    fn f_up(&mut self, _node: &'a Self::Node) -> Result<TreeNodeRecursion> {
+        self.depth -= 1;
+        Ok(TreeNodeRecursion::Continue)
+    }
+}
+
 impl Table {
     fn schema_from_columns(
         columns: &[ColumnDef],
@@ -505,10 +558,9 @@ impl Table {
                     .options
                     .iter()
                     .any(|option| matches!(option.option, ColumnOption::NotNull));
-
                 let struct_field = ArroyoExtensionType::add_metadata(
                     extension,
-                    Field::new(name, data_type, nullable),
+                    Field::new(name, data_type.clone(), nullable),
                 );
 
                 let generating_expression = column.options.iter().find_map(|option| {
@@ -562,12 +614,22 @@ impl Table {
                         &mut PlannerContext::default(),
                     )?;
 
-                    Ok(FieldSpec::VirtualField {
-                        field: struct_field,
-                        expression: df_expr,
-                    })
+                    let mut metadata_finder = MetadataFinder::default();
+                    df_expr.visit(&mut metadata_finder)?;
+
+                    if let Some(key) = metadata_finder.key {
+                        Ok(FieldSpec::Metadata {
+                            field: struct_field,
+                            key,
+                        })
+                    } else {
+                        Ok(FieldSpec::Virtual {
+                            field: struct_field,
+                            expression: df_expr,
+                        })
+                    }
                 } else {
-                    Ok(FieldSpec::StructField(struct_field))
+                    Ok(FieldSpec::Struct(struct_field))
                 }
             })
             .collect::<Result<Vec<_>>>()
