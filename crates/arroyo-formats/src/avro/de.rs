@@ -5,7 +5,7 @@ use arroyo_rpc::formats::AvroFormat;
 use arroyo_rpc::schema_resolver::SchemaResolver;
 use arroyo_types::SourceError;
 use serde_json::{json, Value as JsonValue};
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
@@ -13,9 +13,9 @@ use tracing::info;
 pub(crate) async fn avro_messages(
     format: &AvroFormat,
     schema_registry: &Arc<Mutex<HashMap<u32, Schema>>>,
-    resolver: &Arc<dyn SchemaResolver + Sync>,
+    schema_resolver: &Arc<dyn SchemaResolver + Sync>,
     mut msg: &[u8],
-) -> Result<Vec<AvroResult<Value>>, SourceError> {
+) -> Result<Vec<AvroResult<(u32, Value)>>, SourceError> {
     let id = if format.confluent_schema_registry {
         let magic_byte = msg[0];
         if magic_byte != 0 {
@@ -38,8 +38,8 @@ pub(crate) async fn avro_messages(
     let mut registry = schema_registry.lock().await;
 
     let messages = if format.raw_datums || format.confluent_schema_registry {
-        let schema = if let std::collections::hash_map::Entry::Vacant(e) = registry.entry(id) {
-            let new_schema = resolver
+        let schema = if let Entry::Vacant(entry) = registry.entry(id) {
+            let new_schema = schema_resolver
                 .resolve_schema(id)
                 .await
                 .map_err(|e| SourceError::other("schema registry error", e))?
@@ -61,7 +61,7 @@ pub(crate) async fn avro_messages(
             })?;
 
             info!("Loaded new schema with id {} from Schema Registry", id);
-            e.insert(new_schema);
+            entry.insert(new_schema);
 
             registry.get(&id).unwrap()
         } else {
@@ -73,11 +73,14 @@ pub(crate) async fn avro_messages(
             schema,
             &mut buf,
             format.reader_schema.as_ref().map(|t| t.into()),
-        )]
+        )
+        .map(|v| (id, v))]
     } else {
-        Reader::new(msg)
-            .map_err(|e| SourceError::bad_data(format!("invalid Avro schema in message: {:?}", e)))?
-            .collect()
+        let reader = Reader::new(msg).map_err(|e| {
+            SourceError::bad_data(format!("invalid Avro schema in message: {:?}", e))
+        })?;
+        registry.insert(id, reader.writer_schema().clone());
+        reader.into_iter().map(|x| x.map(|v| (id, v))).collect()
     };
     Ok(messages)
 }

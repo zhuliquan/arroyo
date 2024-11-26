@@ -1,4 +1,4 @@
-use crate::avro::de;
+use crate::avro::{self, de};
 use crate::proto::schema::get_pool;
 use crate::{proto, should_flush};
 use arrow::array::{Int32Builder, Int64Builder};
@@ -86,11 +86,10 @@ pub struct ArrowDeserializer {
     schema: ArroyoSchema,
     bad_data: BadData,
     json_decoder: Option<(arrow::json::reader::Decoder, TimestampNanosecondBuilder)>,
+    avro_decoder: Option<(avro::reader::AvroDecoder, TimestampNanosecondBuilder)>,
     buffered_count: usize,
     buffered_since: Instant,
-    schema_registry: Arc<Mutex<HashMap<u32, apache_avro::schema::Schema>>>,
     proto_pool: DescriptorPool,
-    schema_resolver: Arc<dyn SchemaResolver + Sync>,
     additional_fields_builder: Option<HashMap<String, Box<dyn ArrayBuilder>>>,
 }
 
@@ -159,12 +158,22 @@ impl ArrowDeserializer {
                     TimestampNanosecondBuilder::new(),
                 )
             }),
+            avro_decoder: matches!(format, Format::Avro(_)).then(|| {
+                (
+                    avro::reader::AvroDecoder {
+                        buffer: vec![],
+                        lookup: HashMap::new(),
+                        schema: Arc::clone(&schema.schema),
+                        schema_registry: Arc::new(Mutex::new(HashMap::new())),
+                        schema_resolver,
+                    },
+                    TimestampNanosecondBuilder::new(),
+                )
+            }),
             format: Arc::new(format),
             framing: framing.map(Arc::new),
             schema,
-            schema_registry: Arc::new(Mutex::new(HashMap::new())),
             bad_data,
-            schema_resolver,
             proto_pool,
             buffered_count: 0,
             buffered_since: Instant::now(),
@@ -374,10 +383,14 @@ impl ArrowDeserializer {
             unreachable!("not avro");
         };
 
+        let Some((avro_decoder, _)) = &self.avro_decoder else {
+            panic!("avro decoder not initialized");
+        };
+
         let messages = match de::avro_messages(
             format,
-            &self.schema_registry,
-            &self.schema_resolver,
+            &avro_decoder.schema_registry,
+            &avro_decoder.schema_resolver,
             msg,
         )
         .await
@@ -393,28 +406,19 @@ impl ArrowDeserializer {
         messages
             .into_iter()
             .map(|record| {
-                let value = record.map_err(|e| {
+                let (id, value) = record.map_err(|e| {
                     SourceError::bad_data(format!("failed to deserialize from avro: {:?}", e))
                 })?;
-
                 if into_json {
                     self.decode_into_json(builders, de::avro_to_json(value), timestamp);
                 } else {
-                    // for now round-trip through json in order to handle unsupported avro features
-                    // as that allows us to rely on raw json deserialization
-                    let json = de::avro_to_json(value).to_string();
-
-                    let Some((decoder, timestamp_builder)) = &mut self.json_decoder else {
-                        panic!("json decoder not initialized");
+                    let Some((avro_decoder, timestamp_builder)) = &mut self.avro_decoder else {
+                        panic!("avro decoder not initialized");
                     };
-
-                    decoder
-                        .decode(json.as_bytes())
-                        .map_err(|e| SourceError::bad_data(format!("invalid JSON: {:?}", e)))?;
+                    avro_decoder.append_value((id, value));
                     self.buffered_count += 1;
                     timestamp_builder.append_value(to_nanos(timestamp) as i64);
                 }
-
                 Ok(())
             })
             .filter_map(|r: Result<(), SourceError>| r.err())

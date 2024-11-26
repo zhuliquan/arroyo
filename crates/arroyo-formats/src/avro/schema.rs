@@ -1,13 +1,13 @@
 use anyhow::{anyhow, bail};
-use apache_avro::Schema;
-use arrow_schema::{DataType, Field, Fields, TimeUnit};
+use apache_avro::Schema as AvroSchema;
+use arrow_schema::{DataType, Field, Fields, Schema as ArrowSchema, TimeUnit};
 use arroyo_rpc::formats::AvroFormat;
 use arroyo_types::ArroyoExtensionType;
-use serde_json::json;
+use serde_json::{json, value::Value as JsonValue};
 use std::sync::Arc;
 
 /// Computes an avro schema from an arrow schema
-pub fn to_avro(name: &str, fields: &Fields) -> Schema {
+pub fn to_avro(name: &str, fields: &Fields) -> AvroSchema {
     let fields: Vec<_> = fields.iter().map(|f| field_to_avro(name, f)).collect();
 
     let schema = json!({
@@ -20,7 +20,7 @@ pub fn to_avro(name: &str, fields: &Fields) -> Schema {
 }
 
 /// Computes an arrow schema from an avro schema
-pub fn to_arrow(schema: &str) -> anyhow::Result<arrow_schema::Schema> {
+pub fn to_arrow(schema: &str) -> anyhow::Result<ArrowSchema> {
     let schema =
         Schema::parse_str(schema).map_err(|e| anyhow!("avro schema is not valid: {:?}", e))?;
 
@@ -35,7 +35,7 @@ pub fn to_arrow(schema: &str) -> anyhow::Result<arrow_schema::Schema> {
     Ok(arrow_schema::Schema::new(fields))
 }
 
-fn field_to_avro(name: &str, field: &Field) -> serde_json::value::Value {
+fn field_to_avro(name: &str, field: &Field) -> JsonValue {
     let next_name = format!("{}_{}", name, &field.name());
     let mut schema = arrow_to_avro(&next_name, field.data_type());
 
@@ -51,7 +51,7 @@ fn field_to_avro(name: &str, field: &Field) -> serde_json::value::Value {
     })
 }
 
-fn arrow_to_avro(name: &str, dt: &DataType) -> serde_json::value::Value {
+fn arrow_to_avro(name: &str, dt: &DataType) -> JsonValue {
     let typ = match dt {
         DataType::Null => unreachable!("null fields are not supported"),
         DataType::Boolean => "boolean",
@@ -105,9 +105,9 @@ fn arrow_to_avro(name: &str, dt: &DataType) -> serde_json::value::Value {
         DataType::Map(_, _) => unimplemented!("maps are not supported"),
         DataType::RunEndEncoded(_, _) => unimplemented!("run end encoded is not supported"),
         DataType::BinaryView => unimplemented!("binary view is not supported"),
-        DataType::Utf8View => unimplemented!("utf8 view is not suported"),
+        DataType::Utf8View => unimplemented!("utf8 view is not supported"),
         DataType::ListView(_) => unimplemented!("list view is not supported"),
-        DataType::LargeListView(_) => unimplemented!("large list view is not suported"),
+        DataType::LargeListView(_) => unimplemented!("large list view is not supported"),
     };
 
     json!({
@@ -115,35 +115,39 @@ fn arrow_to_avro(name: &str, dt: &DataType) -> serde_json::value::Value {
     })
 }
 
-fn to_arrow_datatype(schema: &Schema) -> (DataType, bool, Option<ArroyoExtensionType>) {
+fn to_arrow_datatype(schema: &AvroSchema) -> (DataType, bool, Option<ArroyoExtensionType>) {
     match schema {
-        Schema::Null => (DataType::Null, false, None),
-        Schema::Boolean => (DataType::Boolean, false, None),
-        Schema::Int | Schema::TimeMillis => (DataType::Int32, false, None),
-        Schema::Long => (DataType::Int64, false, None),
-        Schema::TimeMicros => (DataType::Time64(TimeUnit::Microsecond), false, None),
-        Schema::TimestampMillis | Schema::LocalTimestampMillis => (
+        AvroSchema::Null => (DataType::Null, false, None),
+        AvroSchema::Boolean => (DataType::Boolean, false, None),
+        AvroSchema::Int | AvroSchema::TimeMillis => (DataType::Int32, false, None),
+        AvroSchema::Long => (DataType::Int64, false, None),
+        AvroSchema::TimeMicros => (DataType::Time64(TimeUnit::Microsecond), false, None),
+        AvroSchema::TimestampMillis | AvroSchema::LocalTimestampMillis => (
             DataType::Timestamp(TimeUnit::Millisecond, None),
             false,
             None,
         ),
-        Schema::TimestampMicros | Schema::LocalTimestampMicros => (
+        AvroSchema::TimestampMicros | AvroSchema::LocalTimestampMicros => (
             DataType::Timestamp(TimeUnit::Microsecond, None),
             false,
             None,
         ),
-        Schema::Float => (DataType::Float32, false, None),
-        Schema::Double => (DataType::Float64, false, None),
-        Schema::Bytes | Schema::Fixed(_) | Schema::Decimal(_) => (DataType::Utf8, false, None),
-        Schema::String | Schema::Enum(_) | Schema::Uuid => (DataType::Utf8, false, None),
-        Schema::Union(union) => {
+        AvroSchema::Float => (DataType::Float32, false, None),
+        AvroSchema::Double => (DataType::Float64, false, None),
+        AvroSchema::Bytes | AvroSchema::Fixed(_) | AvroSchema::Decimal(_) => {
+            (DataType::Utf8, false, None)
+        }
+        AvroSchema::String | AvroSchema::Enum(_) | AvroSchema::Uuid => {
+            (DataType::Utf8, false, None)
+        }
+        AvroSchema::Union(union) => {
             // currently just support unions that have [t, null] as variants, which is the
             // avro way to represent optional fields
 
             let (nulls, not_nulls): (Vec<_>, Vec<_>) = union
                 .variants()
                 .iter()
-                .partition(|v| matches!(v, Schema::Null));
+                .partition(|v| matches!(v, AvroSchema::Null));
 
             if nulls.len() == 1 && not_nulls.len() == 1 {
                 let (dt, _, ext) = to_arrow_datatype(not_nulls[0]);
@@ -152,7 +156,7 @@ fn to_arrow_datatype(schema: &Schema) -> (DataType, bool, Option<ArroyoExtension
                 (DataType::Utf8, false, Some(ArroyoExtensionType::JSON))
             }
         }
-        Schema::Record(record) => {
+        AvroSchema::Record(record) => {
             let fields = record
                 .fields
                 .iter()
