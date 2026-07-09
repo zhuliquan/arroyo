@@ -911,49 +911,52 @@ export function FormInner({
                   // @ts-ignore
                   const inSchema = property.oneOf.find(x => x.title == value) || property.oneOf[0];
                   return (
-                    <fieldset key={key} style={{ border: '1px solid #888', borderRadius: '8px' }}>
-                      <legend
-                        style={{ marginLeft: '8px', paddingLeft: '16px', paddingRight: '16px' }}
-                      >
-                        {property.title || key}
-                      </legend>
-                      <Stack p={4}>
-                        <SelectWidget
-                          path={typeKey}
-                          valuePath={nextPath}
-                          description={property.description}
-                          options={property.oneOf!.map(oneOf => ({
-                            // @ts-ignore
-                            value: oneOf.title!,
-                            // @ts-ignore
-                            label:
+                    <FormControl isInvalid={errors[nextPath]}>
+                      <fieldset key={key} style={{ border: '1px solid #888', borderRadius: '8px' }}>
+                        <legend
+                          style={{ marginLeft: '8px', paddingLeft: '16px', paddingRight: '16px' }}
+                        >
+                          {property.title || key}
+                        </legend>
+                        <Stack p={4}>
+                          <SelectWidget
+                            path={typeKey}
+                            valuePath={nextPath}
+                            description={property.description}
+                            options={property.oneOf!.map(oneOf => ({
                               // @ts-ignore
-                              oneOf.title! +
+                              value: oneOf.title!,
                               // @ts-ignore
-                              (oneOf.description ? ` — ${oneOf.description.toLowerCase()}` : ''),
-                          }))}
-                          value={value}
-                          onChange={onChange}
-                          resetField={resetField}
-                          readonly={readonly}
-                        />
-                        {value != undefined && (
-                          <Box p={4}>
-                            <FormInner
-                              path={nextPath}
-                              key={value}
-                              // @ts-ignore
-                              schema={inSchema}
-                              errors={errors}
-                              onChange={onChange}
-                              values={values}
-                              resetField={resetField}
-                              readonly={readonly}
-                            />
-                          </Box>
-                        )}
-                      </Stack>
-                    </fieldset>
+                              label:
+                                // @ts-ignore
+                                oneOf.title! +
+                                // @ts-ignore
+                                (oneOf.description ? ` — ${oneOf.description.toLowerCase()}` : ''),
+                            }))}
+                            value={value}
+                            onChange={onChange}
+                            resetField={resetField}
+                            readonly={readonly}
+                          />
+                          {value != undefined && (
+                            <Box p={4}>
+                              <FormInner
+                                path={nextPath}
+                                key={value}
+                                // @ts-ignore
+                                schema={inSchema}
+                                errors={errors}
+                                onChange={onChange}
+                                values={values}
+                                resetField={resetField}
+                                readonly={readonly}
+                              />
+                            </Box>
+                          )}
+                        </Stack>
+                      </fieldset>
+                      <FormErrorMessage>{errors[nextPath] ?? ''}</FormErrorMessage>
+                    </FormControl>
                   );
                 }
               }

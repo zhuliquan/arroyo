@@ -120,7 +120,8 @@
                         "lookup": {
                             "type": "object"
                         }
-                    }
+                    },
+                    "additionalProperties": false
                 }
             ]
         }
