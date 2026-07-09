@@ -727,8 +727,16 @@ export function FormInner({
 }) {
   useEffect(() => {
     if (!schema.properties || Object.keys(schema.properties).length == 0) {
-      // @ts-ignore
-      onChange({ target: { name: path, value: {} } });
+      if (path) {
+        // @ts-ignore
+        onChange({ target: { name: path, value: {} } });
+      }
+    } else if (path) {
+      const current = traversePath(values, path);
+      if (current === undefined || current === null || typeof current !== 'object') {
+        // @ts-ignore
+        onChange({ target: { name: path, value: {} } });
+      }
     }
   }, []);
 
@@ -899,7 +907,6 @@ export function FormInner({
                     </Box>
                   );
                 } else {
-                  console.warn('Unsupported property', property);
                   return <></>;
                 }
               }
